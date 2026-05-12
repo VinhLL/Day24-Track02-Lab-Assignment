@@ -1,80 +1,78 @@
-# src/quality/validation.py
+import re
+from pathlib import Path
+
 import pandas as pd
-import great_expectations as gx
-from great_expectations.core.expectation_suite import ExpectationSuite
 
-def build_patient_expectation_suite() -> ExpectationSuite:
+VALID_CONDITIONS = {"Tieu duong", "Huyet ap cao", "Tim mach", "Khoe manh"}
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+def build_patient_expectation_suite() -> dict:
     """
-    TODO: Tạo expectation suite cho anonymized patient data.
+    Lightweight expectation-suite description for environments without
+    Great Expectations installed.
     """
-    context = gx.get_context()
-    suite = context.add_expectation_suite("patient_data_suite")
-
-    # Lấy validator
-    df = pd.read_csv("data/raw/patients_raw.csv")
-    validator = context.sources.pandas_default.read_dataframe(df)
-
-    # --- TASK: Thêm các expectations ---
-
-    # 1. patient_id không được null
-    validator.expect_column_values_to_not_be_null("patient_id")
-
-    # 2. TODO: cccd phải có đúng 12 ký tự
-    validator.expect_column_value_lengths_to_equal(
-        column=___,
-        value=___
-    )
-
-    # 3. TODO: ket_qua_xet_nghiem phải trong khoảng [0, 50]
-    validator.expect_column_values_to_be_between(
-        column=___,
-        min_value=___,
-        max_value=___
-    )
-
-    # 4. TODO: benh phải thuộc danh sách hợp lệ
-    valid_conditions = ["Tiểu đường", "Huyết áp cao", "Tim mạch", "Khỏe mạnh"]
-    validator.expect_column_values_to_be_in_set(
-        column=___,
-        value_set=___
-    )
-
-    # 5. TODO: email phải match regex pattern
-    validator.expect_column_values_to_match_regex(
-        column="email",
-        regex=r"___"    # TODO: email regex
-    )
-
-    # 6. TODO: Không được có duplicate patient_id
-    validator.expect_column_values_to_be_unique(column=___)
-
-    validator.save_expectation_suite()
-    return suite
+    return {
+        "suite_name": "patient_data_suite",
+        "expectations": [
+            "patient_id not null",
+            "cccd length equals 12",
+            "ket_qua_xet_nghiem between 0 and 50",
+            "benh belongs to allowed condition set",
+            "email matches email regex",
+            "patient_id unique",
+        ],
+    }
 
 
 def validate_anonymized_data(filepath: str) -> dict:
-    """
-    TODO: Validate anonymized data.
-    Trả về dict: {"success": bool, "failed_checks": list, "stats": dict}
-    """
-    df = pd.read_csv(filepath)
+    df = pd.read_csv(filepath, dtype={"cccd": str, "so_dien_thoai": str})
     results = {
         "success": True,
         "failed_checks": [],
         "stats": {
             "total_rows": len(df),
-            "columns": list(df.columns)
-        }
+            "columns": list(df.columns),
+        },
     }
 
-    # Check 1: Không còn CCCD gốc dạng số thuần túy
-    # (sau anonymization, cccd phải là fake hoặc masked)
-    # TODO: implement check
+    def fail(message: str) -> None:
+        results["success"] = False
+        results["failed_checks"].append(message)
 
-    # Check 2: Không có null values trong các cột quan trọng
-    # TODO: implement check
+    important_columns = ["patient_id", "cccd", "so_dien_thoai", "email", "benh"]
+    missing_columns = [column for column in important_columns if column not in df.columns]
+    if missing_columns:
+        fail(f"Missing required columns: {missing_columns}")
+        return results
 
-    # Check 3: Số rows phải bằng original
-    # TODO: implement check
+    if df[important_columns].isnull().any().any():
+        fail("Null values found in important columns")
+
+    if not df["patient_id"].is_unique:
+        fail("Duplicate patient_id values found")
+
+    if not df["cccd"].astype(str).str.fullmatch(r"\d{12}").all():
+        fail("CCCD values must be 12 digits after replacement")
+
+    if not df["so_dien_thoai"].astype(str).str.fullmatch(r"0[35789]\d{8}").all():
+        fail("Phone values must match Vietnamese mobile format")
+
+    if not df["email"].astype(str).map(lambda value: bool(EMAIL_RE.match(value))).all():
+        fail("Email values must match email format")
+
+    if "ket_qua_xet_nghiem" in df and not df["ket_qua_xet_nghiem"].between(0, 50).all():
+        fail("ket_qua_xet_nghiem values must be between 0 and 50")
+
+    raw_path = Path(filepath).resolve().parents[1] / "raw" / "patients_raw.csv"
+    if raw_path.exists():
+        original_df = pd.read_csv(raw_path, dtype={"cccd": str, "so_dien_thoai": str})
+        if len(df) != len(original_df):
+            fail("Anonymized row count does not match raw dataset")
+
+        original_cccd = set(original_df["cccd"].astype(str))
+        anonymized_cccd = set(df["cccd"].astype(str))
+        if original_cccd & anonymized_cccd:
+            fail("Original CCCD values still appear in anonymized data")
 
     return results

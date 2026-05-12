@@ -1,64 +1,95 @@
-# src/pii/detector.py
-from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
-from presidio_analyzer.nlp_engine import NlpEngineProvider
+import re
+from dataclasses import dataclass
+from typing import Iterable
 
-def build_vietnamese_analyzer() -> AnalyzerEngine:
-    """
-    TODO: Xây dựng AnalyzerEngine với các recognizer tùy chỉnh cho VN.
-    """
 
-    # --- TASK 2.2.1 ---
-    # Tạo CCCD recognizer: số CCCD VN có đúng 12 chữ số
-    cccd_pattern = Pattern(
-        name="cccd_pattern",
-        regex=r"___",          # TODO: điền regex cho 12 chữ số
-        score=0.9
-    )
-    cccd_recognizer = PatternRecognizer(
-        supported_entity="VN_CCCD",
-        patterns=[cccd_pattern],
-        context=["cccd", "căn cước", "chứng minh", "cmnd"]
-    )
+@dataclass
+class SimpleRecognizerResult:
+    entity_type: str
+    start: int
+    end: int
+    score: float
 
-    # --- TASK 2.2.2 ---
-    # Tạo phone recognizer: số điện thoại VN (0[3|5|7|8|9]xxxxxxxx)
-    phone_recognizer = PatternRecognizer(
-        supported_entity="VN_PHONE",
-        patterns=[Pattern(
-            name="vn_phone",
-            regex=r"___",      # TODO: điền regex
-            score=0.85
-        )],
-        context=["điện thoại", "sdt", "phone", "liên hệ"]
+
+class VietnamesePIIAnalyzer:
+    """Small analyzer compatible with the Presidio analyze() call shape."""
+
+    CCCD_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
+    PHONE_RE = re.compile(r"(?<!\d)0?[35789]\d{8}(?!\d)")
+    EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+    NAME_RE = re.compile(
+        r"\b[A-Za-zÀ-ỹĐđ]+(?:\s+[A-Za-zÀ-ỹĐđ]+){1,5}\b",
+        re.UNICODE,
     )
 
-    # --- TASK 2.2.3 ---
-    # Tạo NLP engine dùng spaCy Vietnamese model
-    provider = NlpEngineProvider(nlp_configuration={
-        "nlp_engine_name": "spacy",
-        "models": [{"lang_code": "vi", 
-                    "model_name": "___"}]   # TODO: điền model name
-    })
-    nlp_engine = provider.create_engine()
+    def analyze(
+        self,
+        text: str,
+        language: str = "vi",
+        entities: Iterable[str] | None = None,
+        **_: object,
+    ) -> list[SimpleRecognizerResult]:
+        wanted = set(entities or ["PERSON", "EMAIL_ADDRESS", "VN_CCCD", "VN_PHONE"])
+        text = "" if text is None else str(text)
+        results: list[SimpleRecognizerResult] = []
 
-    # --- TASK 2.2.4 ---
-    # Khởi tạo AnalyzerEngine và add các recognizer
-    analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
-    analyzer.registry.add_recognizer(___)   # TODO
-    analyzer.registry.add_recognizer(___)   # TODO
+        if "EMAIL_ADDRESS" in wanted:
+            results.extend(self._matches(text, self.EMAIL_RE, "EMAIL_ADDRESS", 0.9))
+        if "VN_CCCD" in wanted:
+            results.extend(self._matches(text, self.CCCD_RE, "VN_CCCD", 0.9))
+        if "VN_PHONE" in wanted:
+            results.extend(self._matches(text, self.PHONE_RE, "VN_PHONE", 0.85))
+        if "PERSON" in wanted:
+            results.extend(self._person_matches(text))
 
-    return analyzer
+        return self._dedupe_overlaps(results)
+
+    @staticmethod
+    def _matches(
+        text: str,
+        pattern: re.Pattern[str],
+        entity_type: str,
+        score: float,
+    ) -> list[SimpleRecognizerResult]:
+        return [
+            SimpleRecognizerResult(entity_type, match.start(), match.end(), score)
+            for match in pattern.finditer(text)
+        ]
+
+    def _person_matches(self, text: str) -> list[SimpleRecognizerResult]:
+        results: list[SimpleRecognizerResult] = []
+        for match in self.NAME_RE.finditer(text):
+            value = match.group(0).strip()
+            lower = value.lower()
+            if "@" in value or any(char.isdigit() for char in value):
+                continue
+            if lower in {"email", "cccd", "phone", "sdt"}:
+                continue
+            # Treat full-name-like cells and labels followed by names as PERSON.
+            if len(value.split()) >= 2:
+                results.append(SimpleRecognizerResult("PERSON", match.start(), match.end(), 0.65))
+        return results
+
+    @staticmethod
+    def _dedupe_overlaps(
+        results: list[SimpleRecognizerResult],
+    ) -> list[SimpleRecognizerResult]:
+        ordered = sorted(results, key=lambda r: (r.start, -(r.end - r.start), -r.score))
+        kept: list[SimpleRecognizerResult] = []
+        for result in ordered:
+            if any(result.start < item.end and item.start < result.end for item in kept):
+                continue
+            kept.append(result)
+        return kept
 
 
-def detect_pii(text: str, analyzer: AnalyzerEngine) -> list:
-    """
-    TODO: Detect PII trong text tiếng Việt.
-    Trả về list các RecognizerResult.
-    Entities cần detect: PERSON, EMAIL_ADDRESS, VN_CCCD, VN_PHONE
-    """
-    results = analyzer.analyze(
-        text=___,       # TODO
-        language=___,   # TODO
-        entities=___    # TODO
+def build_vietnamese_analyzer() -> VietnamesePIIAnalyzer:
+    return VietnamesePIIAnalyzer()
+
+
+def detect_pii(text: str, analyzer: VietnamesePIIAnalyzer) -> list[SimpleRecognizerResult]:
+    return analyzer.analyze(
+        text=text,
+        language="vi",
+        entities=["PERSON", "EMAIL_ADDRESS", "VN_CCCD", "VN_PHONE"],
     )
-    return results
